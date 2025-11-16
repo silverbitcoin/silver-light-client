@@ -49,6 +49,10 @@ pub enum Error {
     #[error("Synchronization error: {0}")]
     Sync(String),
 
+    /// Invalid query
+    #[error("Invalid query: {0}")]
+    InvalidQuery(String),
+
     /// Invalid configuration
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),

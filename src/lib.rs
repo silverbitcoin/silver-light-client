@@ -22,14 +22,26 @@
 #![warn(missing_docs, rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
+pub mod cache;
 pub mod certificate;
 pub mod client;
 pub mod error;
 pub mod proof;
+pub mod query;
 pub mod sync;
+pub mod verification;
 
+pub use cache::{CacheStats, QueryResponseCache, TieredCacheStats, TieredQueryCache};
 pub use certificate::{SnapshotCertificate, SnapshotCertificateBuilder};
 pub use client::{LightClient, LightClientConfig, SyncStatus};
 pub use error::{Error, Result};
 pub use proof::{StateProof, StateProofVerifier};
+pub use query::{
+    CacheStats as QueryCacheStats, MerkleProofData, QueryFilter, QueryHandler, QueryResponse,
+    QueryResult,
+};
 pub use sync::{SyncConfig, SyncManager};
+pub use verification::{
+    BatchVerificationResult, ComprehensiveProofVerifier, MerkleProofVerifier,
+    SnapshotCertificateVerifier, ValidatorSignatureVerifier, VerificationResult,
+};
