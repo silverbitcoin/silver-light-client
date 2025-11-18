@@ -13,7 +13,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use silver_core::{PublicKey, SilverAddress, ValidatorMetadata};
 use std::time::Instant;
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Proof verification result
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -6,7 +6,7 @@
 use crate::{Error, Result, SnapshotCertificate, StateProof, StateProofVerifier};
 use serde::{Deserialize, Serialize};
 use silver_core::{
-    Object, ObjectID, Snapshot, SnapshotSequenceNumber, StateDigest, ValidatorMetadata,
+    Object, ObjectID, SnapshotSequenceNumber, ValidatorMetadata,
 };
 use std::collections::HashMap;
 use std::sync::Arc;

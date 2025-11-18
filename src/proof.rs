@@ -8,7 +8,7 @@
 
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
-use silver_core::{Object, ObjectID, StateDigest};
+use silver_core::{Object, StateDigest};
 use std::time::Instant;
 
 /// Merkle proof node

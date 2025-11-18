@@ -10,9 +10,9 @@
 //!
 //! All queries return transaction data with Merkle proofs for verification.
 
-use crate::{Error, Result, StateProof};
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
-use silver_core::{Object, ObjectID, SilverAddress, TransactionDigest};
+use silver_core::{ObjectID, SilverAddress, TransactionDigest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
