@@ -369,7 +369,7 @@ impl Default for StateProofBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use silver_core::{Owner, SilverAddress};
+    use silver_core::{Owner, SilverAddress, ObjectID};
     use silver_core::object::ObjectType;
 
     fn create_test_object() -> Object {

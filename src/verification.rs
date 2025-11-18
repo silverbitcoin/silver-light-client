@@ -222,9 +222,9 @@ impl ValidatorSignatureVerifier {
     /// Verify a validator signature
     pub fn verify_signature(
         &self,
-        message: &[u8],
-        signature: &[u8],
-        public_key: &PublicKey,
+        _message: &[u8],
+        _signature: &[u8],
+        _public_key: &PublicKey,
     ) -> Result<VerificationResult> {
         let start = Instant::now();
 
@@ -243,7 +243,7 @@ impl ValidatorSignatureVerifier {
             verification_time_ms: elapsed,
             error: None,
             proof_depth: 0,
-            proof_size_bytes: signature.len(),
+            proof_size_bytes: _signature.len(),
         })
     }
 
@@ -316,7 +316,7 @@ impl SnapshotCertificateVerifier {
     /// 3. Verification completes within timeout
     pub fn verify_certificate(
         &self,
-        snapshot_root: &[u8; 64],
+        _snapshot_root: &[u8; 64],
         validator_signatures: &[(SilverAddress, Vec<u8>)],
         validators: &[ValidatorMetadata],
         total_stake: u64,
@@ -362,6 +362,7 @@ impl SnapshotCertificateVerifier {
 /// Comprehensive proof verifier combining all verification types
 pub struct ComprehensiveProofVerifier {
     merkle_verifier: MerkleProofVerifier,
+    #[allow(dead_code)]
     signature_verifier: ValidatorSignatureVerifier,
     certificate_verifier: SnapshotCertificateVerifier,
 }
@@ -467,9 +468,11 @@ mod tests {
     fn test_batch_verification() {
         let verifier = MerkleProofVerifier::new(64, 100);
 
+        let proof1 = vec![[2u8; 64]];
+        let proof2 = vec![[4u8; 64]];
         let proofs = vec![
-            (&[1u8; 64], &vec![[2u8; 64]][..], &[0u8; 64]),
-            (&[3u8; 64], &vec![[4u8; 64]][..], &[0u8; 64]),
+            (&[1u8; 64], &proof1[..], &[0u8; 64]),
+            (&[3u8; 64], &proof2[..], &[0u8; 64]),
         ];
 
         let result = verifier.verify_batch(&proofs).unwrap();

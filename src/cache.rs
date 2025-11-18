@@ -313,6 +313,7 @@ pub struct TieredQueryCache {
     cold_cache: QueryResponseCache,
 
     /// Threshold for moving to cold cache
+    #[allow(dead_code)]
     hot_threshold: u64,
 }
 

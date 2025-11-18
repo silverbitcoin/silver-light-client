@@ -247,7 +247,7 @@ impl Default for SnapshotCertificateBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use silver_core::{PublicKey, Signature, SignatureScheme, SilverAddress, ValidatorID};
+    use silver_core::{PublicKey, Signature, SignatureScheme, SilverAddress, ValidatorID, Snapshot};
 
     fn create_test_validator(stake: u64) -> ValidatorMetadata {
         let addr = SilverAddress::new([1u8; 64]);

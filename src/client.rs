@@ -315,7 +315,7 @@ pub struct SyncStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use silver_core::{PublicKey, SignatureScheme, SilverAddress};
+    use silver_core::{PublicKey, SignatureScheme, SilverAddress, Snapshot, StateDigest};
 
     fn create_test_validator(stake: u64) -> ValidatorMetadata {
         // Use stake amount as part of address to make each validator unique
