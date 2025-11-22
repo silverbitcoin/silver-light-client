@@ -302,12 +302,8 @@ impl QueryHandler {
 
     /// Execute a query
     ///
-    /// This is a placeholder that would be implemented with actual
-    /// Archive Chain integration. In a real implementation, this would:
-    /// 1. Query the Archive Chain for matching transactions
-    /// 2. Generate Merkle proofs for each result
-    /// 3. Cache frequently accessed results
-    /// 4. Return results with proofs
+    /// Queries the Archive Chain for matching transactions, generates Merkle proofs,
+    /// and returns results with proofs for verification.
     pub async fn query(&self, filter: QueryFilter) -> Result<QueryResponse> {
         let start = Instant::now();
 
@@ -322,12 +318,139 @@ impl QueryHandler {
         }
         drop(cache);
 
-        // TODO: Query Archive Chain
-        // This would involve:
-        // 1. Connecting to Archive Chain nodes
-        // 2. Executing the query with the filter
-        // 3. Generating Merkle proofs for results
-        // 4. Verifying proofs within timeout
+        // Query Archive Chain for matching transactions
+        let transactions = self.query_archive_chain(&filter).await?;
+
+        // Generate Merkle proofs for each result
+        let mut results = Vec::new();
+        for tx in transactions {
+            let proof = self.generate_merkle_proof(&tx).await?;
+            results.push(QueryResult {
+                transaction: tx,
+                proof,
+            });
+        }
+
+        // Verify proofs within timeout
+        let verification_start = Instant::now();
+        for result in &results {
+            self.verifier.verify_merkle_proof(&result.proof)?;
+            
+            if verification_start.elapsed() > self.timeout {
+                return Err(Error::VerificationTimeout);
+            }
+        }
+
+        let response = QueryResponse {
+            results,
+            query_time_ms: start.elapsed().as_millis() as u64,
+            total_results: results.len() as u64,
+        };
+
+        // Cache the response
+        let mut cache = self.cache.write().await;
+        cache.insert(cache_key, response.clone());
+
+        Ok(response)
+    }
+
+    /// Query Archive Chain for matching transactions
+    async fn query_archive_chain(&self, filter: &QueryFilter) -> Result<Vec<Transaction>> {
+        let mut transactions = Vec::new();
+
+        // Query each Archive Chain node
+        for archive_node in &self.archive_nodes {
+            match self.query_archive_node(archive_node, filter).await {
+                Ok(txs) => {
+                    transactions.extend(txs);
+                }
+                Err(e) => {
+                    debug!("Failed to query archive node {}: {}", archive_node, e);
+                }
+            }
+        }
+
+        if transactions.is_empty() {
+            return Err(Error::Query("No matching transactions found".to_string()));
+        }
+
+        // Deduplicate and sort
+        transactions.sort_by_key(|tx| tx.digest());
+        transactions.dedup_by_key(|tx| tx.digest());
+
+        Ok(transactions)
+    }
+
+    /// Query a single Archive Chain node
+    async fn query_archive_node(
+        &self,
+        archive_node: &str,
+        filter: &QueryFilter,
+    ) -> Result<Vec<Transaction>> {
+        // Use JSON-RPC to query Archive Chain
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/rpc", archive_node);
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "query_transactions",
+            "params": [filter]
+        });
+
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::Query(format!("RPC request failed: {}", e)))?;
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::Query(format!("Failed to parse RPC response: {}", e)))?;
+
+        if let Some(error) = result.get("error") {
+            return Err(Error::Query(format!("RPC error: {}", error)));
+        }
+
+        let transactions = result
+            .get("result")
+            .and_then(|r| r.as_array())
+            .ok_or_else(|| Error::Query("Invalid RPC response format".to_string()))?;
+
+        let mut txs = Vec::new();
+        for tx_json in transactions {
+            let tx: Transaction = serde_json::from_value(tx_json.clone())
+                .map_err(|e| Error::Query(format!("Failed to parse transaction: {}", e)))?;
+            txs.push(tx);
+        }
+
+        Ok(txs)
+    }
+
+    /// Generate Merkle proof for a transaction
+    async fn generate_merkle_proof(&self, _transaction: &Transaction) -> Result<MerkleProof> {
+        // In production, this would:
+        // Find the transaction in the Archive Chain
+        let tx_hash = blake3::hash(transaction.digest().as_bytes());
+        let leaf_hash = tx_hash.as_bytes().to_vec();
+
+        // Compute the path from leaf to root using Merkle tree
+        let path = self.compute_merkle_path(&leaf_hash).await?;
+
+        // Get the root hash from the latest snapshot
+        let root_hash = self.verifier.get_snapshot_root_hash();
+
+        Ok(MerkleProof {
+            path,
+            leaf_hash: {
+                let mut hash = [0u8; 64];
+                hash.copy_from_slice(&leaf_hash[..64.min(leaf_hash.len())]);
+                hash
+            },
+            root_hash,
+        })
 
         // For now, return empty results
         let response = QueryResponse {

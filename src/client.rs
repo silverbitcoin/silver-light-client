@@ -211,31 +211,112 @@ impl LightClient {
 
     /// Query object state from full nodes with proof verification
     ///
-    /// This is a placeholder for the actual RPC implementation.
-    /// In a real implementation, this would:
-    /// 1. Query a full node for the object and proof
-    /// 2. Verify the proof against the latest snapshot
-    /// 3. Return the object if proof is valid
-    pub async fn get_object(&self, _object_id: ObjectID) -> Result<Option<Object>> {
-        // TODO: Implement RPC call to full node
-        // For now, return an error indicating this needs RPC implementation
+    /// Queries a full node for the object and its proof, then verifies
+    /// the proof against the latest snapshot before returning.
+    pub async fn get_object(&self, object_id: ObjectID) -> Result<Option<Object>> {
+        // Query a full node for the object and proof
+        let (object, proof) = self.query_object_with_proof(&object_id).await?;
+
+        if let Some(obj) = &object {
+            // Verify the proof against the latest snapshot
+            self.verifier.verify_object_proof(
+                &obj,
+                &proof,
+                &self.latest_snapshot,
+            )?;
+        }
+
+        Ok(object)
+    }
+
+    /// Query object with proof from a full node
+    async fn query_object_with_proof(
+        &self,
+        object_id: &ObjectID,
+    ) -> Result<(Option<Object>, ObjectProof)> {
+        // Try each full node until one responds
+        for full_node in &self.full_nodes {
+            match self.rpc_client.get_object_with_proof(full_node, object_id).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    tracing::warn!("Failed to query {}: {}", full_node, e);
+                    continue;
+                }
+            }
+        }
+
         Err(Error::Network(
-            "RPC implementation required for get_object".to_string(),
+            "All full nodes failed to respond".to_string(),
         ))
     }
 
     /// Synchronize with the network
     ///
-    /// Downloads the latest snapshot certificate from full nodes
-    /// and verifies it.
+    /// Downloads the latest snapshot certificate from full nodes,
+    /// verifies it, and updates local state.
     pub async fn sync(&mut self) -> Result<()> {
-        // TODO: Implement sync logic
-        // This would:
-        // 1. Query full nodes for latest snapshot certificate
-        // 2. Verify the certificate
-        // 3. Update local state
+        // Query full nodes for latest snapshot certificate
+        let latest_cert = self.query_latest_snapshot_certificate().await?;
+
+        // Verify the certificate
+        self.verifier.verify_snapshot_certificate(&latest_cert)?;
+
+        // Update local state
+        self.latest_snapshot = latest_cert.snapshot.clone();
+        self.latest_certificate = Some(latest_cert);
+
+        // Sync transaction history
+        self.sync_transaction_history().await?;
+
+        Ok(())
+    }
+
+    /// Query latest snapshot certificate from full nodes
+    async fn query_latest_snapshot_certificate(&self) -> Result<SnapshotCertificate> {
+        // Try each full node until one responds
+        for full_node in &self.full_nodes {
+            match self.rpc_client.get_latest_snapshot_certificate(full_node).await {
+                Ok(cert) => return Ok(cert),
+                Err(e) => {
+                    tracing::warn!("Failed to query snapshot from {}: {}", full_node, e);
+                    continue;
+                }
+            }
+        }
+
         Err(Error::Sync(
-            "Sync implementation requires network layer integration".to_string(),
+            "All full nodes failed to respond with snapshot certificate".to_string(),
+        ))
+    }
+
+    /// Sync transaction history
+    async fn sync_transaction_history(&mut self) -> Result<()> {
+        let start_snapshot = self.last_synced_snapshot;
+        let end_snapshot = self.latest_snapshot.sequence_number;
+
+        for snapshot_num in start_snapshot..=end_snapshot {
+            let transactions = self.query_snapshot_transactions(snapshot_num).await?;
+            self.transaction_cache.extend(transactions);
+        }
+
+        self.last_synced_snapshot = end_snapshot;
+        Ok(())
+    }
+
+    /// Query transactions for a specific snapshot
+    async fn query_snapshot_transactions(&self, snapshot_num: u64) -> Result<Vec<Transaction>> {
+        for full_node in &self.full_nodes {
+            match self.rpc_client.get_snapshot_transactions(full_node, snapshot_num).await {
+                Ok(txs) => return Ok(txs),
+                Err(e) => {
+                    tracing::warn!("Failed to query transactions from {}: {}", full_node, e);
+                    continue;
+                }
+            }
+        }
+
+        Err(Error::Sync(
+            "All full nodes failed to respond with transactions".to_string(),
         ))
     }
 

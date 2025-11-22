@@ -185,13 +185,14 @@ impl SyncManager {
         config: &SyncConfig,
         bandwidth_tracker: &Arc<RwLock<BandwidthTracker>>,
     ) -> Result<()> {
-        // TODO: Implement actual RPC calls to full nodes
-        // For now, this is a placeholder that shows the structure
-
         tracing::debug!("Starting sync operation");
 
-        // 1. Query full node for latest snapshot certificate
+        // 1. Query full nodes for latest snapshot certificates
         let certificates = Self::fetch_latest_certificates(config).await?;
+
+        if certificates.is_empty() {
+            return Err(Error::Sync("No certificates received from full nodes".to_string()));
+        }
 
         // 2. Track bandwidth usage
         let total_bytes: usize = certificates.iter().map(|c| c.size_bytes()).sum();
@@ -201,12 +202,26 @@ impl SyncManager {
         }
 
         // 3. Verify and store certificates
-        let client_lock = client.write().await;
+        let mut client_lock = client.write().await;
+        let mut verified_count = 0;
+        
         for certificate in certificates {
-            if let Err(e) = client_lock.verify_certificate(certificate).await {
-                tracing::warn!("Failed to verify certificate: {}", e);
+            match client_lock.verify_certificate(&certificate).await {
+                Ok(_) => {
+                    client_lock.store_certificate(certificate).await?;
+                    verified_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to verify certificate: {}", e);
+                }
             }
         }
+
+        if verified_count == 0 {
+            return Err(Error::Sync("No valid certificates received".to_string()));
+        }
+
+        tracing::info!("Sync completed: verified {} certificates", verified_count);
 
         tracing::debug!("Sync operation completed, used {} bytes", total_bytes);
 
@@ -215,36 +230,164 @@ impl SyncManager {
 
     /// Fetch latest certificates from full nodes
     ///
-    /// This is a placeholder for actual RPC implementation.
+    /// Queries multiple full nodes for latest certificates and verifies
+    /// consistency across nodes before returning.
     async fn fetch_latest_certificates(
-        _config: &SyncConfig,
+        config: &SyncConfig,
     ) -> Result<Vec<SnapshotCertificate>> {
-        // TODO: Implement RPC call to full nodes
-        // This would:
-        // 1. Query multiple full nodes for latest certificates
-        // 2. Verify consistency across nodes
-        // 3. Return verified certificates
+        let mut certificates = Vec::new();
+        let mut errors = Vec::new();
 
-        Err(Error::Network(
-            "RPC implementation required for fetching certificates".to_string(),
-        ))
+        // Query each full node
+        for full_node in &config.full_nodes {
+            match Self::query_full_node_certificates(full_node).await {
+                Ok(certs) => {
+                    certificates.extend(certs);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to query {}: {}", full_node, e);
+                    errors.push(e);
+                }
+            }
+        }
+
+        if certificates.is_empty() {
+            return Err(Error::Network(format!(
+                "Failed to fetch certificates from any full node: {:?}",
+                errors
+            )));
+        }
+
+        // Verify consistency across nodes
+        Self::verify_certificate_consistency(&certificates)?;
+
+        // Sort by snapshot number and deduplicate
+        certificates.sort_by_key(|c| c.snapshot.sequence_number);
+        certificates.dedup_by_key(|c| c.snapshot.sequence_number);
+
+        Ok(certificates)
+    }
+
+    /// Query a single full node for certificates
+    async fn query_full_node_certificates(
+        full_node: &str,
+    ) -> Result<Vec<SnapshotCertificate>> {
+        // Use JSON-RPC to query full node
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/rpc", full_node);
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "get_latest_snapshot_certificates",
+            "params": []
+        });
+
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("RPC request failed: {}", e)))?;
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::Network(format!("Failed to parse RPC response: {}", e)))?;
+
+        if let Some(error) = result.get("error") {
+            return Err(Error::Network(format!("RPC error: {}", error)));
+        }
+
+        let certificates = result
+            .get("result")
+            .and_then(|r| r.as_array())
+            .ok_or_else(|| Error::Network("Invalid RPC response format".to_string()))?;
+
+        let mut certs = Vec::new();
+        for cert_json in certificates {
+            let cert: SnapshotCertificate = serde_json::from_value(cert_json.clone())
+                .map_err(|e| Error::Network(format!("Failed to parse certificate: {}", e)))?;
+            certs.push(cert);
+        }
+
+        Ok(certs)
+    }
+
+    /// Verify consistency of certificates across nodes
+    fn verify_certificate_consistency(certificates: &[SnapshotCertificate]) -> Result<()> {
+        if certificates.is_empty() {
+            return Ok(());
+        }
+
+        // Group by snapshot number
+        let mut by_snapshot: std::collections::HashMap<u64, Vec<&SnapshotCertificate>> =
+            std::collections::HashMap::new();
+
+        for cert in certificates {
+            by_snapshot
+                .entry(cert.snapshot.sequence_number)
+                .or_insert_with(Vec::new)
+                .push(cert);
+        }
+
+        // Verify all certificates for the same snapshot are identical
+        for (snapshot_num, certs) in by_snapshot {
+            if certs.len() > 1 {
+                let first = &certs[0];
+                for other in &certs[1..] {
+                    if first.snapshot.digest != other.snapshot.digest {
+                        return Err(Error::Sync(format!(
+                            "Certificate mismatch for snapshot {}: different digests",
+                            snapshot_num
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Query object state from full nodes with proof
     ///
-    /// This is a placeholder for actual RPC implementation.
+    /// Queries full nodes for object and proof, tracks bandwidth usage,
+    /// and returns object and proof for verification.
     pub async fn query_object_with_proof(
         &self,
-        _object_id: ObjectID,
+        object_id: ObjectID,
     ) -> Result<(Object, StateProof)> {
-        // TODO: Implement RPC call to full nodes
-        // This would:
-        // 1. Query full node for object and proof
-        // 2. Track bandwidth usage
-        // 3. Return object and proof for verification
+        // Query full node for object and proof
+        let (object, proof) = self.query_full_node_for_object(&object_id).await?;
+
+        // Track bandwidth usage
+        let size = object.size_bytes() + proof.size_bytes();
+        {
+            let mut tracker = self.bandwidth_tracker.write().await;
+            tracker.record_usage(size as u64)?;
+        }
+
+        // Return object and proof for verification
+        Ok((object, proof))
+    }
+
+    /// Query a full node for object and proof
+    async fn query_full_node_for_object(
+        &self,
+        object_id: &ObjectID,
+    ) -> Result<(Object, StateProof)> {
+        for full_node in &self.full_nodes {
+            match self.rpc_client.get_object_with_proof(full_node, object_id).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    debug!("Failed to query {}: {}", full_node, e);
+                    continue;
+                }
+            }
+        }
 
         Err(Error::Network(
-            "RPC implementation required for querying objects".to_string(),
+            "All full nodes failed to respond".to_string(),
         ))
     }
 
@@ -263,12 +406,10 @@ impl SyncManager {
 
 /// RPC client for communicating with full nodes
 ///
-/// This is a placeholder for the actual RPC implementation.
-/// In a real implementation, this would use HTTP/WebSocket to
-/// communicate with full node JSON-RPC endpoints.
+/// Uses HTTP/WebSocket to communicate with full node JSON-RPC endpoints.
 pub struct FullNodeRpcClient {
     endpoint: String,
-    #[allow(dead_code)]
+    client: reqwest::Client,
     timeout: Duration,
 }
 
@@ -277,50 +418,149 @@ impl FullNodeRpcClient {
     pub fn new(endpoint: String, timeout_ms: u64) -> Self {
         Self {
             endpoint,
+            client: reqwest::Client::new(),
             timeout: Duration::from_millis(timeout_ms),
         }
     }
 
     /// Fetch the latest snapshot certificate
     pub async fn get_latest_certificate(&self) -> Result<SnapshotCertificate> {
-        // TODO: Implement actual RPC call
-        Err(Error::Network(format!(
-            "RPC not implemented for endpoint: {}",
-            self.endpoint
-        )))
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "get_latest_snapshot_certificate",
+            "params": []
+        });
+
+        let response = self.client
+            .post(&format!("http://{}/rpc", self.endpoint))
+            .json(&request)
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("RPC request failed: {}", e)))?;
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::Network(format!("Failed to parse response: {}", e)))?;
+
+        if let Some(error) = result.get("error") {
+            return Err(Error::Network(format!("RPC error: {}", error)));
+        }
+
+        serde_json::from_value(result.get("result").ok_or_else(|| {
+            Error::Network("Missing result in RPC response".to_string())
+        })?.clone())
+            .map_err(|e| Error::Network(format!("Failed to parse certificate: {}", e)))
     }
 
     /// Fetch a specific snapshot certificate by sequence number
     pub async fn get_certificate(
         &self,
-        _sequence: SnapshotSequenceNumber,
+        sequence: SnapshotSequenceNumber,
     ) -> Result<SnapshotCertificate> {
-        // TODO: Implement actual RPC call
-        Err(Error::Network(format!(
-            "RPC not implemented for endpoint: {}",
-            self.endpoint
-        )))
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "get_snapshot_certificate",
+            "params": [sequence]
+        });
+
+        let response = self.client
+            .post(&format!("http://{}/rpc", self.endpoint))
+            .json(&request)
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("RPC request failed: {}", e)))?;
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::Network(format!("Failed to parse response: {}", e)))?;
+
+        if let Some(error) = result.get("error") {
+            return Err(Error::Network(format!("RPC error: {}", error)));
+        }
+
+        serde_json::from_value(result.get("result").ok_or_else(|| {
+            Error::Network("Missing result in RPC response".to_string())
+        })?.clone())
+            .map_err(|e| Error::Network(format!("Failed to parse certificate: {}", e)))
     }
 
     /// Query object state with proof
     pub async fn get_object_with_proof(
         &self,
-        _object_id: ObjectID,
+        object_id: ObjectID,
     ) -> Result<(Object, StateProof)> {
-        // TODO: Implement actual RPC call
-        Err(Error::Network(format!(
-            "RPC not implemented for endpoint: {}",
-            self.endpoint
-        )))
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "get_object_with_proof",
+            "params": [object_id.to_string()]
+        });
+
+        let response = self.client
+            .post(&format!("http://{}/rpc", self.endpoint))
+            .json(&request)
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("RPC request failed: {}", e)))?;
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::Network(format!("Failed to parse response: {}", e)))?;
+
+        if let Some(error) = result.get("error") {
+            return Err(Error::Network(format!("RPC error: {}", error)));
+        }
+
+        let result_obj = result.get("result").ok_or_else(|| {
+            Error::Network("Missing result in RPC response".to_string())
+        })?;
+
+        let object = serde_json::from_value(result_obj.get("object").ok_or_else(|| {
+            Error::Network("Missing object in result".to_string())
+        })?.clone())
+            .map_err(|e| Error::Network(format!("Failed to parse object: {}", e)))?;
+
+        let proof = serde_json::from_value(result_obj.get("proof").ok_or_else(|| {
+            Error::Network("Missing proof in result".to_string())
+        })?.clone())
+            .map_err(|e| Error::Network(format!("Failed to parse proof: {}", e)))?;
+
+        Ok((object, proof))
     }
 
     /// Check if the full node is reachable
     pub async fn health_check(&self) -> Result<bool> {
-        // TODO: Implement actual health check
-        Err(Error::Network(format!(
-            "Health check not implemented for endpoint: {}",
-            self.endpoint
-        )))
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "health",
+            "params": []
+        });
+
+        match self.client
+            .post(&format!("http://{}/rpc", self.endpoint))
+            .json(&request)
+            .timeout(self.timeout)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(_) => Ok(false),
+        }
     }
 }
 

@@ -222,15 +222,47 @@ impl ValidatorSignatureVerifier {
     /// Verify a validator signature
     pub fn verify_signature(
         &self,
-        _message: &[u8],
-        _signature: &[u8],
-        _public_key: &PublicKey,
+        message: &[u8],
+        signature: &[u8],
+        public_key: &PublicKey,
     ) -> Result<VerificationResult> {
         let start = Instant::now();
 
-        // TODO: Implement actual signature verification
-        // This would use the appropriate cryptographic library based on the signature scheme
-        // For now, return a placeholder result
+        // Verify signature using the appropriate cryptographic library
+        let is_valid = match public_key.scheme {
+            SignatureScheme::SphincsPlus => {
+                let verifier = silver_crypto::SphincsPlus;
+                let sig = silver_core::Signature {
+                    scheme: SignatureScheme::SphincsPlus,
+                    bytes: signature.to_vec(),
+                };
+                verifier.verify(message, &sig, public_key).is_ok()
+            }
+            SignatureScheme::Dilithium3 => {
+                let verifier = silver_crypto::Dilithium3;
+                let sig = silver_core::Signature {
+                    scheme: SignatureScheme::Dilithium3,
+                    bytes: signature.to_vec(),
+                };
+                verifier.verify(message, &sig, public_key).is_ok()
+            }
+            SignatureScheme::Secp512r1 => {
+                let verifier = silver_crypto::Secp512r1;
+                let sig = silver_core::Signature {
+                    scheme: SignatureScheme::Secp512r1,
+                    bytes: signature.to_vec(),
+                };
+                verifier.verify(message, &sig, public_key).is_ok()
+            }
+            SignatureScheme::Hybrid => {
+                let verifier = silver_crypto::HybridSignature;
+                let sig = silver_core::Signature {
+                    scheme: SignatureScheme::Hybrid,
+                    bytes: signature.to_vec(),
+                };
+                verifier.verify(message, &sig, public_key).is_ok()
+            }
+        };
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -238,10 +270,16 @@ impl ValidatorSignatureVerifier {
             return Err(Error::VerificationTimeout);
         }
 
+        let error = if is_valid {
+            None
+        } else {
+            Some("Signature verification failed".to_string())
+        };
+
         Ok(VerificationResult {
-            is_valid: true, // Placeholder
+            is_valid,
             verification_time_ms: elapsed,
-            error: None,
+            error,
             proof_depth: 0,
             proof_size_bytes: _signature.len(),
         })
