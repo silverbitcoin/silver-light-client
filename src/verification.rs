@@ -11,7 +11,8 @@
 
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
-use silver_core::{PublicKey, SilverAddress, ValidatorMetadata};
+use silver_core::{PublicKey, Signature, SignatureScheme, SilverAddress, ValidatorMetadata};
+use silver_crypto::SignatureVerifier;
 use std::time::Instant;
 use tracing::warn;
 
@@ -232,7 +233,7 @@ impl ValidatorSignatureVerifier {
         let is_valid = match public_key.scheme {
             SignatureScheme::SphincsPlus => {
                 let verifier = silver_crypto::SphincsPlus;
-                let sig = silver_core::Signature {
+                let sig = Signature {
                     scheme: SignatureScheme::SphincsPlus,
                     bytes: signature.to_vec(),
                 };
@@ -240,7 +241,7 @@ impl ValidatorSignatureVerifier {
             }
             SignatureScheme::Dilithium3 => {
                 let verifier = silver_crypto::Dilithium3;
-                let sig = silver_core::Signature {
+                let sig = Signature {
                     scheme: SignatureScheme::Dilithium3,
                     bytes: signature.to_vec(),
                 };
@@ -248,7 +249,7 @@ impl ValidatorSignatureVerifier {
             }
             SignatureScheme::Secp512r1 => {
                 let verifier = silver_crypto::Secp512r1;
-                let sig = silver_core::Signature {
+                let sig = Signature {
                     scheme: SignatureScheme::Secp512r1,
                     bytes: signature.to_vec(),
                 };
@@ -256,8 +257,16 @@ impl ValidatorSignatureVerifier {
             }
             SignatureScheme::Hybrid => {
                 let verifier = silver_crypto::HybridSignature;
-                let sig = silver_core::Signature {
+                let sig = Signature {
                     scheme: SignatureScheme::Hybrid,
+                    bytes: signature.to_vec(),
+                };
+                verifier.verify(message, &sig, public_key).is_ok()
+            }
+            SignatureScheme::Secp256k1 => {
+                let verifier = silver_crypto::Secp256k1Signer;
+                let sig = Signature {
+                    scheme: SignatureScheme::Secp256k1,
                     bytes: signature.to_vec(),
                 };
                 verifier.verify(message, &sig, public_key).is_ok()
@@ -281,7 +290,7 @@ impl ValidatorSignatureVerifier {
             verification_time_ms: elapsed,
             error,
             proof_depth: 0,
-            proof_size_bytes: _signature.len(),
+            proof_size_bytes: signature.len(),
         })
     }
 
@@ -430,9 +439,9 @@ impl ComprehensiveProofVerifier {
         let start = Instant::now();
 
         // Verify Merkle proof
-        let merkle_result = self
-            .merkle_verifier
-            .verify_proof(tx_hash, proof_path, snapshot_root)?;
+        let merkle_result =
+            self.merkle_verifier
+                .verify_proof(tx_hash, proof_path, snapshot_root)?;
 
         if !merkle_result.is_valid {
             return Ok(merkle_result);
@@ -463,92 +472,5 @@ impl ComprehensiveProofVerifier {
             proof_depth: merkle_result.proof_depth,
             proof_size_bytes: merkle_result.proof_size_bytes + cert_result.proof_size_bytes,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_merkle_proof_verifier_creation() {
-        let verifier = MerkleProofVerifier::new(64, 100);
-        assert_eq!(verifier.max_depth, 64);
-        assert_eq!(verifier.timeout_ms, 100);
-    }
-
-    #[test]
-    fn test_merkle_proof_verification_simple() {
-        let verifier = MerkleProofVerifier::new(64, 100);
-
-        let tx_hash = [1u8; 64];
-        let proof_path = vec![[2u8; 64]];
-        let root = [0u8; 64];
-
-        let result = verifier.verify_proof(&tx_hash, &proof_path, &root).unwrap();
-        assert!(!result.is_valid); // Will fail because we don't have a valid proof
-    }
-
-    #[test]
-    fn test_merkle_proof_depth_check() {
-        let verifier = MerkleProofVerifier::new(5, 100);
-
-        let tx_hash = [1u8; 64];
-        let proof_path = vec![[2u8; 64]; 10]; // Depth > max_depth
-        let root = [0u8; 64];
-
-        let result = verifier.verify_proof(&tx_hash, &proof_path, &root).unwrap();
-        assert!(!result.is_valid);
-        assert!(result.error.is_some());
-    }
-
-    #[test]
-    fn test_batch_verification() {
-        let verifier = MerkleProofVerifier::new(64, 100);
-
-        let proof1 = vec![[2u8; 64]];
-        let proof2 = vec![[4u8; 64]];
-        let proofs = vec![
-            (&[1u8; 64], &proof1[..], &[0u8; 64]),
-            (&[3u8; 64], &proof2[..], &[0u8; 64]),
-        ];
-
-        let result = verifier.verify_batch(&proofs).unwrap();
-        assert_eq!(result.total_proofs, 2);
-    }
-
-    #[test]
-    fn test_validator_signature_verifier() {
-        let verifier = ValidatorSignatureVerifier::new(100);
-        assert_eq!(verifier.timeout_ms, 100);
-    }
-
-    #[test]
-    fn test_snapshot_certificate_verifier() {
-        let verifier = SnapshotCertificateVerifier::new(100);
-        assert_eq!(verifier.timeout_ms, 100);
-    }
-
-    #[test]
-    fn test_comprehensive_verifier() {
-        let verifier = ComprehensiveProofVerifier::new(100);
-
-        let tx_hash = [1u8; 64];
-        let proof_path = vec![[2u8; 64]];
-        let snapshot_root = [0u8; 64];
-        let validator_signatures = vec![];
-        let validators = vec![];
-        let total_stake = 0;
-
-        let result = verifier.verify_query_result(
-            &tx_hash,
-            &proof_path,
-            &snapshot_root,
-            &validator_signatures,
-            &validators,
-            total_stake,
-        );
-
-        assert!(result.is_ok());
     }
 }

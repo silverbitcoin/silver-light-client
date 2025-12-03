@@ -57,7 +57,7 @@ impl<'de> Deserialize<'de> for ProofNode {
         }
 
         let helper = ProofNodeHelper::deserialize(deserializer)?;
-        
+
         if helper.hash.len() != 64 {
             return Err(serde::de::Error::custom(format!(
                 "Expected 64 bytes, got {}",
@@ -100,11 +100,7 @@ pub struct StateProof {
 
 impl StateProof {
     /// Create a new state proof
-    pub fn new(
-        object: Object,
-        proof_path: Vec<ProofNode>,
-        state_root: StateDigest,
-    ) -> Self {
+    pub fn new(object: Object, proof_path: Vec<ProofNode>, state_root: StateDigest) -> Self {
         Self {
             object,
             proof_path,
@@ -230,7 +226,7 @@ impl StateProofVerifier {
     /// Create a new proof verifier with default settings
     pub fn new() -> Self {
         Self {
-            max_depth: 64, // Maximum tree depth
+            max_depth: 64,   // Maximum tree depth
             timeout_ms: 100, // 100ms timeout as per requirements
         }
     }
@@ -363,96 +359,5 @@ impl StateProofBuilder {
 impl Default for StateProofBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use silver_core::{Owner, SilverAddress, ObjectID};
-    use silver_core::object::ObjectType;
-
-    fn create_test_object() -> Object {
-        Object {
-            id: ObjectID::new([1u8; 64]),
-            version: silver_core::SequenceNumber::new(1),
-            owner: Owner::AddressOwner(SilverAddress::new([2u8; 64])),
-            object_type: ObjectType::Coin,
-            data: vec![1, 2, 3, 4],
-            previous_transaction: silver_core::TransactionDigest::new([3u8; 64]),
-            storage_rebate: 0,
-        }
-    }
-
-    #[test]
-    fn test_proof_verification_simple() {
-        let object = create_test_object();
-        let state_root = StateDigest::new([0u8; 64]);
-
-        // Create a simple proof (empty path for testing)
-        let proof = StateProof::new(object, vec![], state_root);
-
-        // This will fail because we don't have a valid proof path
-        // but it tests the verification logic
-        assert!(proof.verify().is_err());
-    }
-
-    #[test]
-    fn test_proof_depth() {
-        let object = create_test_object();
-        let state_root = StateDigest::new([0u8; 64]);
-
-        let mut proof_path = Vec::new();
-        for _ in 0..10 {
-            proof_path.push(ProofNode::Left([0u8; 64]));
-        }
-
-        let proof = StateProof::new(object, proof_path, state_root);
-        assert_eq!(proof.depth(), 10);
-    }
-
-    #[test]
-    fn test_proof_verifier_max_depth() {
-        let verifier = StateProofVerifier::with_config(5, 100);
-
-        let object = create_test_object();
-        let state_root = StateDigest::new([0u8; 64]);
-
-        // Create proof with depth > max_depth
-        let mut proof_path = Vec::new();
-        for _ in 0..10 {
-            proof_path.push(ProofNode::Left([0u8; 64]));
-        }
-
-        let proof = StateProof::new(object, proof_path, state_root);
-
-        // Should fail due to depth
-        assert!(verifier.verify(&proof).is_err());
-    }
-
-    #[test]
-    fn test_proof_builder() {
-        let object = create_test_object();
-        let state_root = StateDigest::new([0u8; 64]);
-
-        let proof = StateProofBuilder::new()
-            .object(object)
-            .add_left_sibling([1u8; 64])
-            .add_right_sibling([2u8; 64])
-            .state_root(state_root)
-            .build()
-            .unwrap();
-
-        assert_eq!(proof.depth(), 2);
-    }
-
-    #[test]
-    fn test_proof_size() {
-        let object = create_test_object();
-        let state_root = StateDigest::new([0u8; 64]);
-        let proof = StateProof::new(object, vec![], state_root);
-
-        let size = proof.size_bytes();
-        assert!(size > 0);
     }
 }

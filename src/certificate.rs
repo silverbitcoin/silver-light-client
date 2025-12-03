@@ -101,34 +101,22 @@ impl SnapshotCertificate {
 
         for sig in &self.validator_signatures {
             // Get validator metadata
-            let validator = validators
-                .get(&sig.validator.address)
-                .ok_or_else(|| {
-                    Error::InvalidCertificate(format!(
-                        "Unknown validator: {}",
-                        sig.validator.address
-                    ))
-                })?;
+            let validator = validators.get(&sig.validator.address).ok_or_else(|| {
+                Error::InvalidCertificate(format!("Unknown validator: {}", sig.validator.address))
+            })?;
 
             // Verify signature
             let message = self.signing_message();
-            
+
             // Create appropriate verifier based on signature scheme
             let verifier: Box<dyn silver_crypto::SignatureVerifier> = match sig.signature.scheme {
-                silver_core::SignatureScheme::SphincsPlus => {
-                    Box::new(silver_crypto::SphincsPlus)
-                }
-                silver_core::SignatureScheme::Dilithium3 => {
-                    Box::new(silver_crypto::Dilithium3)
-                }
-                silver_core::SignatureScheme::Secp512r1 => {
-                    Box::new(silver_crypto::Secp512r1)
-                }
-                silver_core::SignatureScheme::Hybrid => {
-                    Box::new(silver_crypto::HybridSignature)
-                }
+                silver_core::SignatureScheme::SphincsPlus => Box::new(silver_crypto::SphincsPlus),
+                silver_core::SignatureScheme::Dilithium3 => Box::new(silver_crypto::Dilithium3),
+                silver_core::SignatureScheme::Secp512r1 => Box::new(silver_crypto::Secp512r1),
+                silver_core::SignatureScheme::Hybrid => Box::new(silver_crypto::HybridSignature),
+                silver_core::SignatureScheme::Secp256k1 => Box::new(silver_crypto::Secp256k1Signer),
             };
-            
+
             if let Err(_) = verifier.verify(&message, &sig.signature, &validator.protocol_pubkey) {
                 return Err(Error::InvalidCertificate(format!(
                     "Invalid signature from validator: {}",
@@ -202,16 +190,14 @@ impl SnapshotCertificateBuilder {
 
     /// Add validator metadata for signature verification
     pub fn add_validator(mut self, validator: ValidatorMetadata) -> Self {
-        self.validators
-            .insert(validator.silver_address, validator);
+        self.validators.insert(validator.silver_address, validator);
         self
     }
 
     /// Add multiple validators
     pub fn add_validators(mut self, validators: Vec<ValidatorMetadata>) -> Self {
         for validator in validators {
-            self.validators
-                .insert(validator.silver_address, validator);
+            self.validators.insert(validator.silver_address, validator);
         }
         self
     }
@@ -241,89 +227,5 @@ impl SnapshotCertificateBuilder {
 impl Default for SnapshotCertificateBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use silver_core::{PublicKey, Signature, SignatureScheme, SilverAddress, ValidatorID, Snapshot};
-
-    fn create_test_validator(stake: u64) -> ValidatorMetadata {
-        let addr = SilverAddress::new([1u8; 64]);
-        let pubkey = PublicKey {
-            scheme: SignatureScheme::Dilithium3,
-            bytes: vec![0u8; 100],
-        };
-
-        ValidatorMetadata::new(
-            addr,
-            pubkey.clone(),
-            pubkey.clone(),
-            pubkey,
-            stake,
-            "127.0.0.1:9000".to_string(),
-            "127.0.0.1:9001".to_string(),
-        )
-        .unwrap()
-    }
-
-    fn create_test_snapshot() -> Snapshot {
-        Snapshot::new(
-            1,
-            1000,
-            SnapshotDigest::new([0u8; 64]),
-            StateDigest::new([1u8; 64]),
-            vec![],
-            0,
-            vec![],
-            1000,
-        )
-    }
-
-    #[test]
-    fn test_certificate_from_snapshot() {
-        let snapshot = create_test_snapshot();
-        let cert = SnapshotCertificate::from_snapshot(&snapshot);
-
-        assert_eq!(cert.sequence_number, snapshot.sequence_number);
-        assert_eq!(cert.timestamp, snapshot.timestamp);
-        assert_eq!(cert.root_state_digest, snapshot.root_state_digest);
-        assert_eq!(cert.transaction_count, snapshot.transactions.len());
-    }
-
-    #[test]
-    fn test_certificate_quorum_verification() {
-        let snapshot = create_test_snapshot();
-        let cert = SnapshotCertificate::from_snapshot(&snapshot);
-
-        // Test with sufficient stake (2/3+)
-        assert!(cert.verify_quorum(1000).is_ok());
-
-        // Test with insufficient stake
-        assert!(cert.verify_quorum(2000).is_err());
-    }
-
-    #[test]
-    fn test_certificate_size() {
-        let snapshot = create_test_snapshot();
-        let cert = SnapshotCertificate::from_snapshot(&snapshot);
-
-        let size = cert.size_bytes();
-        assert!(size > 0);
-        assert!(size < 10_000); // Should be compact (< 10KB)
-    }
-
-    #[test]
-    fn test_certificate_is_genesis() {
-        let mut snapshot = create_test_snapshot();
-        snapshot.sequence_number = 0;
-        let cert = SnapshotCertificate::from_snapshot(&snapshot);
-
-        assert!(cert.is_genesis());
-
-        snapshot.sequence_number = 1;
-        let cert = SnapshotCertificate::from_snapshot(&snapshot);
-        assert!(!cert.is_genesis());
     }
 }

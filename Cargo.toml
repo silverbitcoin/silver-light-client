@@ -27,6 +27,12 @@ bincode = "1.3"
 
 # Cryptography
 blake3 = "1.5"
+hex = "0.4"
+rand = { workspace = true }
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+jsonrpsee = { workspace = true }
 
 # Error handling
 thiserror = "1.0"
@@ -34,6 +40,7 @@ anyhow = "1.0"
 
 # Logging
 tracing = "0.1"
+tracing-subscriber = { workspace = true }
 
 # Time
 chrono = "0.4"

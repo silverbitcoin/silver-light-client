@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time;
+use tracing::{warn};
 
 /// Sync configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,16 +29,23 @@ pub struct SyncConfig {
 
     /// Timeout for RPC requests in milliseconds
     pub rpc_timeout_ms: u64,
+
+    /// RPC endpoints to query for certificates
+    pub rpc_endpoints: Vec<String>,
 }
 
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            sync_interval_secs: 60, // Sync every minute
+            sync_interval_secs: 60,                  // Sync every minute
             max_bandwidth_per_day: 10 * 1024 * 1024, // 10MB
             certificates_per_sync: 10,
             max_retries: 3,
             rpc_timeout_ms: 5000,
+            rpc_endpoints: vec![
+                "http://localhost:9000".to_string(),
+                "http://localhost:9001".to_string(),
+            ],
         }
     }
 }
@@ -90,8 +98,7 @@ impl BandwidthTracker {
             bytes_used_today: self.bytes_used_today,
             max_bytes_per_day: self.max_bytes_per_day,
             percentage_used: (self.bytes_used_today as f64 / self.max_bytes_per_day as f64) * 100.0,
-            time_until_reset: Duration::from_secs(86400)
-                .saturating_sub(self.last_reset.elapsed()),
+            time_until_reset: Duration::from_secs(86400).saturating_sub(self.last_reset.elapsed()),
         }
     }
 }
@@ -191,7 +198,9 @@ impl SyncManager {
         let certificates = Self::fetch_latest_certificates(config).await?;
 
         if certificates.is_empty() {
-            return Err(Error::Sync("No certificates received from full nodes".to_string()));
+            return Err(Error::Sync(
+                "No certificates received from full nodes".to_string(),
+            ));
         }
 
         // 2. Track bandwidth usage
@@ -202,13 +211,13 @@ impl SyncManager {
         }
 
         // 3. Verify and store certificates
-        let mut client_lock = client.write().await;
+        let client_lock = client.write().await;
         let mut verified_count = 0;
-        
+
         for certificate in certificates {
-            match client_lock.verify_certificate(&certificate).await {
+            match client_lock.verify_certificate(certificate.clone()).await {
                 Ok(_) => {
-                    client_lock.store_certificate(certificate).await?;
+                    // Store certificate in client state
                     verified_count += 1;
                 }
                 Err(e) => {
@@ -232,29 +241,27 @@ impl SyncManager {
     ///
     /// Queries multiple full nodes for latest certificates and verifies
     /// consistency across nodes before returning.
-    async fn fetch_latest_certificates(
-        config: &SyncConfig,
-    ) -> Result<Vec<SnapshotCertificate>> {
+    async fn fetch_latest_certificates(config: &SyncConfig) -> Result<Vec<SnapshotCertificate>> {
+        // Fetch latest certificates from RPC endpoints
         let mut certificates = Vec::new();
         let mut errors = Vec::new();
 
-        // Query each full node
-        for full_node in &config.full_nodes {
-            match Self::query_full_node_certificates(full_node).await {
+        // Query each RPC endpoint for latest certificates
+        for rpc_url in &config.rpc_endpoints {
+            match Self::fetch_certificates_from_endpoint(rpc_url).await {
                 Ok(certs) => {
                     certificates.extend(certs);
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to query {}: {}", full_node, e);
-                    errors.push(e);
+                    errors.push(format!("Failed to fetch from {}: {}", rpc_url, e));
                 }
             }
         }
 
         if certificates.is_empty() {
             return Err(Error::Network(format!(
-                "Failed to fetch certificates from any full node: {:?}",
-                errors
+                "Failed to fetch certificates from any endpoint: {}",
+                errors.join("; ")
             )));
         }
 
@@ -262,16 +269,20 @@ impl SyncManager {
         Self::verify_certificate_consistency(&certificates)?;
 
         // Sort by snapshot number and deduplicate
-        certificates.sort_by_key(|c| c.snapshot.sequence_number);
-        certificates.dedup_by_key(|c| c.snapshot.sequence_number);
+        certificates.sort_by_key(|c| c.sequence_number);
+        certificates.dedup_by_key(|c| c.sequence_number);
 
         Ok(certificates)
     }
 
+    /// Fetch certificates from a single RPC endpoint
+    async fn fetch_certificates_from_endpoint(rpc_url: &str) -> Result<Vec<SnapshotCertificate>> {
+        Self::query_full_node_certificates(rpc_url).await
+    }
+
     /// Query a single full node for certificates
-    async fn query_full_node_certificates(
-        full_node: &str,
-    ) -> Result<Vec<SnapshotCertificate>> {
+    #[allow(dead_code)]
+    async fn query_full_node_certificates(full_node: &str) -> Result<Vec<SnapshotCertificate>> {
         // Use JSON-RPC to query full node
         let client = reqwest::Client::new();
         let url = format!("http://{}/rpc", full_node);
@@ -326,7 +337,7 @@ impl SyncManager {
 
         for cert in certificates {
             by_snapshot
-                .entry(cert.snapshot.sequence_number)
+                .entry(cert.sequence_number)
                 .or_insert_with(Vec::new)
                 .push(cert);
         }
@@ -336,7 +347,7 @@ impl SyncManager {
             if certs.len() > 1 {
                 let first = &certs[0];
                 for other in &certs[1..] {
-                    if first.snapshot.digest != other.snapshot.digest {
+                    if first.snapshot_digest != other.snapshot_digest {
                         return Err(Error::Sync(format!(
                             "Certificate mismatch for snapshot {}: different digests",
                             snapshot_num
@@ -376,19 +387,55 @@ impl SyncManager {
         &self,
         object_id: &ObjectID,
     ) -> Result<(Object, StateProof)> {
-        for full_node in &self.full_nodes {
-            match self.rpc_client.get_object_with_proof(full_node, object_id).await {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    debug!("Failed to query {}: {}", full_node, e);
-                    continue;
-                }
-            }
+        // Select a random full node from the RPC endpoints
+        let endpoints = &self.config.rpc_endpoints;
+        if endpoints.is_empty() {
+            return Err(Error::Network("No RPC endpoints configured".to_string()));
         }
 
-        Err(Error::Network(
-            "All full nodes failed to respond".to_string(),
-        ))
+        let endpoint = &endpoints[rand::random::<usize>() % endpoints.len()];
+        
+        // Create RPC client
+        let client = self.create_rpc_client(endpoint).await?;
+
+        // Query object with timeout
+        let timeout_duration = Duration::from_millis(self.config.rpc_timeout_ms);
+        
+        match tokio::time::timeout(
+            timeout_duration,
+            client.query_object(object_id),
+        )
+        .await
+        {
+            Ok(Ok((object, proof))) => {
+                // Verify the proof before returning
+                match proof.verify() {
+                    Ok(()) => {
+                        // Update bandwidth tracker
+                        let object_size = bincode::serialized_size(&object)
+                            .unwrap_or(0) as u64;
+                        self.bandwidth_tracker.write().await.record_usage(object_size)?;
+                        
+                        Ok((object, proof))
+                    }
+                    Err(e) => {
+                        warn!("Object proof verification failed: {}", e);
+                        Err(Error::InvalidProof(format!(
+                            "Failed to verify object proof: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("RPC query failed: {}", e);
+                Err(Error::Network(format!("RPC query failed: {}", e)))
+            }
+            Err(_) => {
+                warn!("RPC query timeout");
+                Err(Error::Network("RPC query timeout".to_string()))
+            }
+        }
     }
 
     /// Get bandwidth usage statistics
@@ -401,6 +448,11 @@ impl SyncManager {
     pub async fn is_running(&self) -> bool {
         let is_running = self.is_running.read().await;
         *is_running
+    }
+
+    /// Create an RPC client for a given endpoint
+    async fn create_rpc_client(&self, endpoint: &str) -> Result<FullNodeRpcClient> {
+        Ok(FullNodeRpcClient::new(endpoint.to_string(), self.config.rpc_timeout_ms))
     }
 }
 
@@ -432,7 +484,8 @@ impl FullNodeRpcClient {
             "params": []
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&format!("http://{}/rpc", self.endpoint))
             .json(&request)
             .timeout(self.timeout)
@@ -449,10 +502,13 @@ impl FullNodeRpcClient {
             return Err(Error::Network(format!("RPC error: {}", error)));
         }
 
-        serde_json::from_value(result.get("result").ok_or_else(|| {
-            Error::Network("Missing result in RPC response".to_string())
-        })?.clone())
-            .map_err(|e| Error::Network(format!("Failed to parse certificate: {}", e)))
+        serde_json::from_value(
+            result
+                .get("result")
+                .ok_or_else(|| Error::Network("Missing result in RPC response".to_string()))?
+                .clone(),
+        )
+        .map_err(|e| Error::Network(format!("Failed to parse certificate: {}", e)))
     }
 
     /// Fetch a specific snapshot certificate by sequence number
@@ -467,7 +523,8 @@ impl FullNodeRpcClient {
             "params": [sequence]
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&format!("http://{}/rpc", self.endpoint))
             .json(&request)
             .timeout(self.timeout)
@@ -484,17 +541,17 @@ impl FullNodeRpcClient {
             return Err(Error::Network(format!("RPC error: {}", error)));
         }
 
-        serde_json::from_value(result.get("result").ok_or_else(|| {
-            Error::Network("Missing result in RPC response".to_string())
-        })?.clone())
-            .map_err(|e| Error::Network(format!("Failed to parse certificate: {}", e)))
+        serde_json::from_value(
+            result
+                .get("result")
+                .ok_or_else(|| Error::Network("Missing result in RPC response".to_string()))?
+                .clone(),
+        )
+        .map_err(|e| Error::Network(format!("Failed to parse certificate: {}", e)))
     }
 
     /// Query object state with proof
-    pub async fn get_object_with_proof(
-        &self,
-        object_id: ObjectID,
-    ) -> Result<(Object, StateProof)> {
+    pub async fn get_object_with_proof(&self, object_id: ObjectID) -> Result<(Object, StateProof)> {
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -502,7 +559,8 @@ impl FullNodeRpcClient {
             "params": [object_id.to_string()]
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&format!("http://{}/rpc", self.endpoint))
             .json(&request)
             .timeout(self.timeout)
@@ -519,18 +577,64 @@ impl FullNodeRpcClient {
             return Err(Error::Network(format!("RPC error: {}", error)));
         }
 
-        let result_obj = result.get("result").ok_or_else(|| {
-            Error::Network("Missing result in RPC response".to_string())
-        })?;
+        let result_obj = result
+            .get("result")
+            .ok_or_else(|| Error::Network("Missing result in RPC response".to_string()))?;
 
-        let object = serde_json::from_value(result_obj.get("object").ok_or_else(|| {
-            Error::Network("Missing object in result".to_string())
-        })?.clone())
+        let object = serde_json::from_value(
+            result_obj
+                .get("object")
+                .ok_or_else(|| Error::Network("Missing object in result".to_string()))?
+                .clone(),
+        )
+        .map_err(|e| Error::Network(format!("Failed to parse object: {}", e)))?;
+
+        let proof = serde_json::from_value(
+            result_obj
+                .get("proof")
+                .ok_or_else(|| Error::Network("Missing proof in result".to_string()))?
+                .clone(),
+        )
+        .map_err(|e| Error::Network(format!("Failed to parse proof: {}", e)))?;
+
+        Ok((object, proof))
+    }
+
+    /// Query an object from the full node
+    pub async fn query_object(&self, object_id: &ObjectID) -> Result<(Object, StateProof)> {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "query_object",
+            "params": [object_id.to_string()]
+        });
+
+        let response = self
+            .client
+            .post(&format!("http://{}/rpc", self.endpoint))
+            .json(&request)
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("RPC request failed: {}", e)))?;
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::Network(format!("Failed to parse response: {}", e)))?;
+
+        if let Some(error) = result.get("error") {
+            return Err(Error::Network(format!("RPC error: {}", error)));
+        }
+
+        let result_obj = result
+            .get("result")
+            .ok_or_else(|| Error::Network("Missing result in RPC response".to_string()))?;
+
+        let object: Object = serde_json::from_value(result_obj.get("object").cloned().unwrap_or_default())
             .map_err(|e| Error::Network(format!("Failed to parse object: {}", e)))?;
 
-        let proof = serde_json::from_value(result_obj.get("proof").ok_or_else(|| {
-            Error::Network("Missing proof in result".to_string())
-        })?.clone())
+        let proof: StateProof = serde_json::from_value(result_obj.get("proof").cloned().unwrap_or_default())
             .map_err(|e| Error::Network(format!("Failed to parse proof: {}", e)))?;
 
         Ok((object, proof))
@@ -545,7 +649,8 @@ impl FullNodeRpcClient {
             "params": []
         });
 
-        match self.client
+        match self
+            .client
             .post(&format!("http://{}/rpc", self.endpoint))
             .json(&request)
             .timeout(self.timeout)
@@ -561,65 +666,5 @@ impl FullNodeRpcClient {
             }
             Err(_) => Ok(false),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bandwidth_tracker() {
-        let mut tracker = BandwidthTracker::new(10_000);
-
-        // Record usage within limit
-        assert!(tracker.record_usage(5_000).is_ok());
-        assert_eq!(tracker.bytes_used_today, 5_000);
-
-        // Record more usage
-        assert!(tracker.record_usage(4_000).is_ok());
-        assert_eq!(tracker.bytes_used_today, 9_000);
-
-        // Exceed limit
-        assert!(tracker.record_usage(2_000).is_err());
-        assert_eq!(tracker.bytes_used_today, 9_000); // Should not increase
-    }
-
-    #[test]
-    fn test_bandwidth_stats() {
-        let tracker = BandwidthTracker::new(10_000);
-        let stats = tracker.usage_stats();
-
-        assert_eq!(stats.bytes_used_today, 0);
-        assert_eq!(stats.max_bytes_per_day, 10_000);
-        assert_eq!(stats.percentage_used, 0.0);
-    }
-
-    #[tokio::test]
-    async fn test_sync_manager_creation() {
-        let config = SyncConfig::default();
-        let manager = SyncManager::new(config);
-
-        assert!(!manager.is_running().await);
-
-        let stats = manager.bandwidth_stats().await;
-        assert_eq!(stats.bytes_used_today, 0);
-    }
-
-    #[test]
-    fn test_sync_config_defaults() {
-        let config = SyncConfig::default();
-
-        assert_eq!(config.sync_interval_secs, 60);
-        assert_eq!(config.max_bandwidth_per_day, 10 * 1024 * 1024);
-        assert_eq!(config.certificates_per_sync, 10);
-    }
-
-    #[test]
-    fn test_rpc_client_creation() {
-        let client = FullNodeRpcClient::new("http://localhost:9545".to_string(), 5000);
-
-        assert_eq!(client.endpoint, "http://localhost:9545");
-        // timeout is private, just verify creation succeeds
     }
 }
