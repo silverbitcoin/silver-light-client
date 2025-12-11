@@ -557,9 +557,9 @@ impl QueryHandler {
         // Use JSON-RPC to query Archive Chain for Merkle metadata
         let client = reqwest::Client::new();
 
-        // Try to query from a known Archive Chain node
-        // In production, this would be configurable
-        let archive_url = "http://localhost:9546/rpc";
+        // Query from Archive Chain node (configurable via environment or config)
+        let archive_url = std::env::var("ARCHIVE_CHAIN_URL")
+            .unwrap_or_else(|_| "http://localhost:9546/rpc".to_string());
 
         let request = serde_json::json!({
             "jsonrpc": "2.0",

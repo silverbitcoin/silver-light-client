@@ -303,12 +303,40 @@ impl LightClient {
 
     /// Query latest snapshot certificate from full nodes
     async fn query_latest_snapshot_certificate(&self) -> Result<SnapshotCertificate> {
+        use reqwest::Client;
+        
+        let client = Client::new();
+        
         // Try each full node until one responds
         for full_node in &self.config.full_node_endpoints {
             tracing::debug!("Querying snapshot from: {}", full_node);
-            // RPC client implementation would go here
-            // For now, return error to try next node
-            continue;
+            
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "silver_getLatestSnapshot",
+                "params": []
+            });
+
+            match client.post(full_node)
+                .json(&request)
+                .send()
+                .await {
+                Ok(response) => {
+                    if let Ok(data) = response.json::<serde_json::Value>().await {
+                        if let Some(result) = data.get("result") {
+                            if let Ok(cert) = serde_json::from_value::<SnapshotCertificate>(result.clone()) {
+                                tracing::debug!("Successfully retrieved snapshot certificate from {}", full_node);
+                                return Ok(cert);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to query snapshot from {}: {}", full_node, e);
+                    continue;
+                }
+            }
         }
 
         Err(Error::Sync(
